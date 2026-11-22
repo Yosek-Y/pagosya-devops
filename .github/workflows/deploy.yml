@@ -1,0 +1,62 @@
+name: deploy
+
+# TODO 1 · Evento: un push a main dispara el pipeline.
+# workflow_dispatch permite lanzarlo a mano desde la pestaña Actions (útil para pruebas).
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# TODO 1 (cont.) · Evita que dos despliegues corran a la vez: el segundo espera al primero.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      # TODO 2 · El usuario sale de un secret, no se escribe en el archivo.
+      IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/pagosya-api
+    steps:
+      - uses: actions/checkout@v4
+
+      # TODO 3 · Tag = primeros 7 caracteres del hash del commit (igual que git rev-parse --short HEAD).
+      - name: Calcular el tag
+        run: echo "TAG=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+
+      # TODO 2 · Login en el registry con la acción oficial y los secrets del repo.
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # TODO 3 · Construir la imagen con el tag del commit (el ARG se hornea en /app/VERSION).
+      - name: Construir la imagen
+        run: docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" app/
+
+      # TODO 4 · Arrancar el contenedor (8080 -> 8000, init: true como en compose.yml)
+      # y esperar hasta 15 s a que responda con la versión correcta.
+      # TODO 5 · Si nunca responde, exit 1 deja el job en rojo.
+      - name: Arrancar el contenedor y correr el smoke test
+        run: |
+          docker run -d --init --name pagosya -p 8080:8000 "$IMAGE:$TAG"
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8080/ | grep -q "$TAG"; then
+              echo "Smoke OK: la API responde con la versión $TAG"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "Smoke falló con $TAG" >&2
+          docker logs pagosya >&2
+          exit 1
+
+      # TODO 5 · Los pasos siguientes se saltan si uno anterior falló,
+      # así que la imagen solo se publica si el smoke pasó.
+      - name: Publicar la imagen
+        run: docker push "$IMAGE:$TAG"
